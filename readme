@@ -1,1 +1,41 @@
+POC Projects Folder Structure
 
+This repository holds separate Proof of Concept (POC) implementations for different computer vision use cases (Dynamic Privacy Masking, Queue Management, Heatmap, Intrusion Detection, etc.).
+
+Each use case folder follows a common structure to keep training data, test data, source code, and outputs organized.
+
+poc_projects/
+│
+├── <use_case_name>/
+│   ├── data/
+│   │   ├── train/    → Training dataset for the use case
+│   │   ├── test/     → Test dataset for evaluation
+│   │   └── val/      → Validation dataset (optional, used during training)
+│   │
+│   ├── src/          → Source code specific to the use case
+│   │                   (e.g., preprocessing scripts, inference code, integration with Rockchip)
+│   │
+│   ├── models/       → Model files (ONNX, trained weights, configs)
+│   │
+│   ├── output/       → Outputs from experiments and POC runs
+│   │                   (e.g., predictions, result videos, JSON/CSV logs)
+│   │
+│   └── logs/         → Logs generated during training, testing, or runtime
+│                       (e.g., training progress, error logs, performance metrics)
+│
+└── README.md         → This file (overview of structure)
+
+
+Notes
+
+Each use case (e.g., dynamic_privacy_masking/, queue_management/, etc.) is independent and self-contained.
+
+data/ should be lightweight for POCs; store large raw datasets externally and reference them via symlinks or .gitignore.
+
+src/ may include both Python and C++ code depending on Rockchip deployment requirements.
+
+models/ should hold both converted ONNX files and optimized models.
+
+output/ should be cleared or compressed periodically to save space.
+
+logs/ can be used for TensorBoard logs, error reports, and debugging.
