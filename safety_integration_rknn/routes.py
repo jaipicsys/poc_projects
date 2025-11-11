@@ -36,6 +36,125 @@ CAMERA_CONFIG = {
     "cam3": {"camera_name": "cam 3"},
     "cam4": {"camera_name": "cam 4"}
 }
+
+@api_bp.route("/ppe/compliance-trends", methods=["GET"])
+def get_ppe_compliance_trends_api():
+    """
+    Returns last 28 days PPE violation trends.
+    Only counts actual violations: no_hardhat & no_vest
+
+    {
+        "labels": [...dates...],
+        "no_hardhat": [...],
+        "no_vest": [...]
+    }
+    """
+    try:
+        from datetime import datetime, timedelta, time
+
+        conn = get_violations_connection()
+        c = conn.cursor()
+
+        labels = []
+        no_hardhat_daily = []
+        no_vest_daily = []
+
+        today = datetime.now()
+
+        for i in range(28):
+            day = today - timedelta(days=(27 - i))
+            start = datetime.combine(day.date(), time.min)
+            end = datetime.combine(day.date(), time.max)
+
+            labels.append(day.date().isoformat())
+
+            # Count for each violation type
+            for violation_type, arr in [
+                ('no_hardhat', no_hardhat_daily),
+                ('no_vest', no_vest_daily)
+            ]:
+                c.execute("""
+                    SELECT COUNT(*)
+                    FROM violations
+                    WHERE violation = ?
+                    AND timestamp BETWEEN ? AND ?
+                """, (violation_type, start.isoformat(), end.isoformat()))
+                arr.append(c.fetchone()[0] or 0)
+
+        conn.close()
+
+        return jsonify({
+            "labels": labels,
+            "no_hardhat": no_hardhat_daily,
+            "no_vest": no_vest_daily
+        })
+
+    except Exception as e:
+        print("[ERROR] get_ppe_compliance_trends_api:", e)
+        return jsonify({"error": str(e)}), 500
+
+@api_bp.route("/violation_location", methods=["GET"])
+def get_violation_location_api():
+    """
+    Returns total violations camera-wise using config.json camera names:
+    {
+        "total": 265,
+        "locations": {
+            "Warehouse": 120,
+            "Entrance": 45,
+            ...
+        }
+    }
+    """
+    try:
+        from app import CONFIG
+
+        conn = get_violations_connection()
+        c = conn.cursor()
+
+        # Fetch camera names from config
+        camera_names = CONFIG.get("camera_names", {})
+
+        # PPE (only real violations)
+        c.execute("""
+            SELECT cam_id, COUNT(*)
+            FROM violations
+            WHERE violation IN ('no_hardhat', 'no_vest')
+            GROUP BY cam_id
+        """)
+        ppe_counts = dict(c.fetchall())
+
+        # Fire violations
+        c.execute("""
+            SELECT cam_id, COUNT(*)
+            FROM fire_events
+            GROUP BY cam_id
+        """)
+        fire_counts = dict(c.fetchall())
+
+        conn.close()
+
+        location_data = {}
+        total = 0
+
+        # Combine both tables per camera
+        all_cams = set(ppe_counts.keys()) | set(fire_counts.keys())
+        for cam in all_cams:
+            count = ppe_counts.get(cam, 0) + fire_counts.get(cam, 0)
+            total += count
+            location_name = camera_names.get(cam, cam)
+            location_data[location_name] = count
+
+        return jsonify({
+            #"total": total,
+            "locations": location_data
+        })
+
+    except Exception as e:
+        print("[ERROR] get_violation_location_api:", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @api_bp.route("/ppe/recent_violations", methods=["GET"])
 def get_violations_list_api():
     """
@@ -221,6 +340,76 @@ def get_fire_camera_status_api():
         print("[ERROR] get_fire_camera_status_api:", e)
         return jsonify({"error": str(e)}), 500
 
+@api_bp.route("/violation_count", methods=["GET"])
+def get_violation_count_api():
+    """
+    Returns combined Fire + PPE (only no_hardhat & no_vest) violation counts:
+    {
+        "total_all": 1250,
+        "last_28_days": 375,
+        "today": 18
+    }
+    """
+    try:
+        from datetime import datetime, timedelta, time
+
+        conn = get_violations_connection()
+        c = conn.cursor()
+
+        now = datetime.now()
+        start_today = datetime.combine(now.date(), time.min)
+        end_today = datetime.combine(now.date(), time.max)
+
+        last_28_start = now - timedelta(days=28)
+
+        # --- PPE counts (only real violations) ---
+        ppe_query = """
+            SELECT COUNT(*) FROM violations
+            WHERE violation IN ('no_hardhat', 'no_vest')
+            AND timestamp BETWEEN ? AND ?
+        """
+
+        # --- Fire counts ---
+        fire_query = """
+            SELECT COUNT(*) FROM fire_events
+            WHERE timestamp BETWEEN ? AND ?
+        """
+
+        # Total all-time PPE
+        c.execute("SELECT COUNT(*) FROM violations WHERE violation IN ('no_hardhat', 'no_vest')")
+        total_ppe = c.fetchone()[0] or 0
+
+        # Total all-time Fire
+        c.execute("SELECT COUNT(*) FROM fire_events")
+        total_fire = c.fetchone()[0] or 0
+
+        total_all = total_ppe + total_fire
+
+        # Last 28 days
+        c.execute(ppe_query, (last_28_start.isoformat(), now.isoformat()))
+        last_28_ppe = c.fetchone()[0] or 0
+        c.execute(fire_query, (last_28_start.isoformat(), now.isoformat()))
+        last_28_fire = c.fetchone()[0] or 0
+        last_28_total = last_28_ppe + last_28_fire
+
+        # Today
+        c.execute(ppe_query, (start_today.isoformat(), end_today.isoformat()))
+        today_ppe = c.fetchone()[0] or 0
+        c.execute(fire_query, (start_today.isoformat(), end_today.isoformat()))
+        today_fire = c.fetchone()[0] or 0
+        today_total = today_ppe + today_fire
+
+        conn.close()
+
+        return jsonify({
+            "total_all": total_all,
+            "last_28_days": last_28_total,
+            "today": today_total
+        })
+
+    except Exception as e:
+        print("[ERROR] get_violation_count_api:", e)
+        return jsonify({"error": str(e)}), 500
 
 @api_bp.route("/dashboard/ppe_graph", methods=["GET"])
 def get_ppe_violations_summary_graph():
