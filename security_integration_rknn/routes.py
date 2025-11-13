@@ -865,10 +865,9 @@ def login_user():
             token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
             response = jsonify({"message": "Login successful"})
-            response.set_cookie("token", token, httponly=True, secure=True, samesite="None", path="/", domain=None)
-#            response.set_cookie(
-#                "token", token, httponly=True, samesite="Lax", secure=False
-#            )
+            response.set_cookie(
+                "token", token, httponly=True, samesite="Lax", secure=False
+            )
             return response
         else:
             return jsonify({"error": "Invalid credentials"}), 401

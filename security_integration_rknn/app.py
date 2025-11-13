@@ -26,16 +26,7 @@ FLASK_PORT = CONFIG.get("flask_port", 5000)  # fallback to 5000 if not set
 camera_config = CONFIG.get("rtsp_urls", {})
 
 app = Flask(__name__)
-#CORS(app, supports_credentials=True)
-CORS(
-    app,
-    supports_credentials=True,
-    origins=["*"],
-    allow_headers=["Content-Type", "Authorization"],
-    expose_headers=["Content-Type"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-)
-
+CORS(app, supports_credentials=True)
 app.register_blueprint(api_bp, url_prefix='/api')
 
 def start_scheduler():
