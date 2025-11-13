@@ -1,6 +1,0 @@
-data/
-logs/
-model/
-output/
-src/*
-!src/model.py

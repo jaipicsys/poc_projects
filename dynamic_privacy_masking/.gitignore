@@ -1,8 +1,0 @@
-data/
-models/
-
-data/__init__.py
-data/*.mp4
-models/*.pth
-
-!src/export.py
