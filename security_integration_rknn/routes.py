@@ -36,7 +36,7 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import requests
-from config_utils import reload_email_config, update_report_job, CONFIG
+from config_utils import reload_email_config, update_report_job, CONFIG, CONFIG_LOCK
 import json
 import pandas as pd
 import io
@@ -46,6 +46,11 @@ import db
 import csv
 from io import StringIO
 from flask import make_response
+import base64
+import cv2
+import numpy as np
+from threading import Thread
+import os, sys, time, subprocess
 
 SECRET_KEY = "picsysnexilishrbrdoddaballapur"   
 api_bp = Blueprint('api', __name__)
@@ -865,9 +870,10 @@ def login_user():
             token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
             response = jsonify({"message": "Login successful"})
-            response.set_cookie(
-                "token", token, httponly=True, samesite="Lax", secure=False
-            )
+            response.set_cookie("token", token, httponly=True, secure=True, samesite="None", path="/", domain=None)
+#            response.set_cookie(
+#                "token", token, httponly=True, samesite="Lax", secure=False
+#            )
             return response
         else:
             return jsonify({"error": "Invalid credentials"}), 401
@@ -1443,3 +1449,180 @@ def reset_password():
     clear_otp(email)
 
     return jsonify({"message": "Password reset successful"})
+
+
+@api_bp.route("/config", methods=["GET"])
+def get_camera_config():
+    """Return camera-related config data for frontend editing"""
+    try:
+        with CONFIG_LOCK:
+            with open("config.json") as f:
+                cfg = json.load(f)
+
+        camera_names = cfg.get("camera_names", {})
+        rtsp_urls = cfg.get("rtsp_urls", {})
+        camera_types = cfg.get("camera_types", {})
+        loitering_zones = cfg.get("loitering_zones", {})
+        perimeter_zones = cfg.get("perimeter_zones", {})
+
+        # Build unified camera data
+        cameras = {}
+        for cam_id in set(camera_names.keys()).union(rtsp_urls.keys()):
+            cam_name = camera_names.get(cam_id, cam_id)
+            cam_type = camera_types.get(cam_id)
+            zones = []
+
+            if cam_type == "loitering":
+                zones = loitering_zones.get(cam_id, [])
+            elif cam_type == "perimeter":
+                zones = perimeter_zones.get(cam_id, [])
+
+            cameras[cam_id] = {
+                "name": cam_name,
+                "type": cam_type,
+                "rtsp_url": rtsp_urls.get(cam_id),
+                "zones": zones,
+            }
+
+        result = {
+            "camera_names": camera_names,
+            "rtsp_urls": rtsp_urls,
+            "camera_types": camera_types,
+            "cameras": cameras,
+            "loitering_zones": loitering_zones,
+            "perimeter_zones": perimeter_zones,
+        }
+
+        return jsonify(result), 200
+    except FileNotFoundError:
+        return jsonify({"error": "Config file not found"}), 404
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON in config file"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Failed to load config: {str(e)}"}), 500
+
+@api_bp.route("/config/update", methods=["POST"])
+def update_camera_config():
+    """Update camera-related sections in config.json"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Missing JSON body"}), 400
+
+        with CONFIG_LOCK:
+            with open("config.json") as f:
+                cfg = json.load(f)
+
+            # Update camera_names, rtsp_urls, and camera_types
+            for key in ["camera_names", "rtsp_urls", "camera_types","loitering_zones","perimeter_zones"]:
+                if key in data:
+                    cfg[key] = data[key]
+
+            # Update zones based on cameras[type]
+            if "cameras" in data:
+                for cam_id, cam_data in data["cameras"].items():
+                    cam_type = cam_data.get("type")
+                    zones = cam_data.get("zones", [])
+
+                    # Update camera_types if type is provided
+                    if cam_type:
+                        cfg.setdefault("camera_types", {})[cam_id] = cam_type
+
+                    # Update zones based on type
+                    if cam_type == "loitering":
+                        cfg.setdefault("loitering_zones", {})[cam_id] = zones
+                    elif cam_type == "perimeter":
+                        cfg.setdefault("perimeter_zones", {})[cam_id] = zones
+
+            # Remove zones for deleted cameras
+            for key in ["camera_names", "rtsp_urls", "camera_types"]:
+                for cam_id in set(cfg.get(key, {})).difference(data.get(key, {})):
+                    if cam_id in cfg.get("loitering_zones", {}):
+                        del cfg["loitering_zones"][cam_id]
+                    if cam_id in cfg.get("perimeter_zones", {}):
+                        del cfg["perimeter_zones"][cam_id]
+
+            # Save updated config
+            with open("config.json", "w") as f:
+                json.dump(cfg, f, indent=4)
+
+            # Update memory
+            CONFIG.update(cfg)
+
+        # Restart backend gracefully
+        Thread(target=restart_backend, daemon=True).start()
+        return jsonify({"message": "Config updated successfully, restarting backend..."}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to update config: {str(e)}"}), 500
+
+def restart_backend():
+    """Restart the Flask backend safely"""
+    print("[INFO] Restarting backend after config update...")
+    time.sleep(1)
+    python = sys.executable
+    subprocess.Popen([python, "app.py"])
+    os._exit(0)
+
+
+@api_bp.route("/camera_frame/<cam_id>", methods=["GET"])
+def get_camera_frame(cam_id):
+    """Return a single frame from the camera RTSP URL as base64 image."""
+    try:
+        with open("config.json") as f:
+            cfg = json.load(f)
+
+        rtsp_url = cfg.get("rtsp_urls", {}).get(cam_id)
+        if not rtsp_url:
+            return jsonify({"error": f"RTSP URL not found for camera: {cam_id}"}), 404
+
+        cap = cv2.VideoCapture(rtsp_url)
+        if not cap.isOpened():
+            return jsonify({"error": f"Failed to open RTSP stream for camera: {cam_id}"}), 500
+
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            return jsonify({"error": f"Failed to read frame from camera: {cam_id}"}), 500
+
+        # Draw ROI zones based on camera type
+        camera_types = cfg.get("camera_types", {})
+        cam_type = camera_types.get(cam_id)
+        zones = []
+        color = (0, 255, 0)  # Default: Green
+
+        if cam_type == "loitering":
+            zones = cfg.get("loitering_zones", {}).get(cam_id, [])
+            color = (255, 0, 0)  # Blue for loitering
+        elif cam_type == "perimeter":
+            zones = cfg.get("perimeter_zones", {}).get(cam_id, [])
+            color = (0, 0, 255)  # Red for perimeter
+
+        for zone in zones:
+            points = zone.get("points", [])
+            if points:
+                pts = np.array(points, np.int32).reshape((-1, 1, 2))
+                cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=2)
+                cv2.putText(
+                    frame,
+                    zone.get("name", ""),
+                    (points[0][0], points[0][1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    color,
+                    2,
+                )
+
+        # Resize preview
+        h, w = frame.shape[:2]
+        frame_resized = cv2.resize(frame, (int(w * 0.5), int(h * 0.5)))
+        _, buffer = cv2.imencode(".jpg", frame_resized)
+        img_base64 = base64.b64encode(buffer).decode("utf-8")
+
+        return jsonify({"image": img_base64})
+    except FileNotFoundError:
+        return jsonify({"error": "Config file not found"}), 404
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON in config file"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch camera frame: {str(e)}"}), 500
