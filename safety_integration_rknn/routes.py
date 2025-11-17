@@ -25,6 +25,16 @@ import pandas as pd
 import io
 from email_utils import send_email, generate_and_store_otp, verify_otp, clear_otp
 import globals
+from threading import Thread
+from threading import Lock
+CONFIG_LOCK = Lock()
+import cv2
+import numpy as np
+import base64
+from flask import request, jsonify
+import subprocess
+import sys
+import time
 
 SECRET_KEY = "picsysnexilishrbrdoddaballapur"   
 api_bp = Blueprint('api', __name__)
@@ -146,7 +156,7 @@ def get_violation_location_api():
             location_data[location_name] = count
 
         return jsonify({
-            #"total": total,
+            "total": total,
             "locations": location_data
         })
 
@@ -1226,9 +1236,12 @@ def login_user():
             token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
             response = jsonify({"message": "Login successful"})
-            response.set_cookie(
-                "token", token, httponly=True, samesite="Lax", secure=False
-            )
+            response.set_cookie("token", token, httponly=True, secure=True, samesite="None", path="/", domain=None)
+
+           # response.set_cookie(
+            #    "token", token, httponly=True, samesite="Lax", secure=False
+            #)
+
             return response
         else:
             return jsonify({"error": "Invalid credentials"}), 401
@@ -1837,3 +1850,137 @@ def reset_password():
     clear_otp(email)
 
     return jsonify({"message": "Password reset successful"})
+
+@api_bp.route("/config", methods=["GET"])
+def get_camera_config():
+    """Return camera-related config data for frontend editing"""
+    try:
+        with CONFIG_LOCK:
+            with open("config.json") as f:
+                cfg = json.load(f)
+
+        camera_names = cfg.get("camera_names", {})
+        rtsp_urls = cfg.get("rtsp_urls", {})
+        camera_types = cfg.get("camera_types", {})
+        rois = cfg.get("rois", {})
+
+        # Build unified camera data
+        cameras = {}
+        for cam_id in set(camera_names.keys()).union(rtsp_urls.keys()):
+            cameras[cam_id] = {
+                "name": camera_names.get(cam_id, cam_id),
+                "type": camera_types.get(cam_id),
+                "rtsp_url": rtsp_urls.get(cam_id),
+                "roi": rois.get(cam_id, []),
+            }
+
+        result = {
+            "camera_names": camera_names,
+            "rtsp_urls": rtsp_urls,
+            "camera_types": camera_types,
+            "rois": rois,
+            "cameras": cameras,
+        }
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to load config: {str(e)}"}), 500
+
+@api_bp.route("/config/update", methods=["POST"])
+def update_camera_config():
+    """Update camera-related sections in config.json"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Missing JSON body"}), 400
+
+        with CONFIG_LOCK:
+            with open("config.json") as f:
+                cfg = json.load(f)
+
+            # Update basic fields
+            for key in [
+                "camera_names",
+                "rtsp_urls",
+                "camera_types",
+                "rois"
+            ]:
+                if key in data:
+                    cfg[key] = data[key]
+
+            # Update nested camera structure
+            if "cameras" in data:
+                for cam_id, cam_data in data["cameras"].items():
+                    if "name" in cam_data:
+                        cfg.setdefault("camera_names", {})[cam_id] = cam_data["name"]
+
+                    if "type" in cam_data:
+                        cfg.setdefault("camera_types", {})[cam_id] = cam_data["type"]
+
+                    if "rtsp_url" in cam_data:
+                        cfg.setdefault("rtsp_urls", {})[cam_id] = cam_data["rtsp_url"]
+
+                    if "roi" in cam_data:
+                        cfg.setdefault("rois", {})[cam_id] = cam_data["roi"]
+
+            # Remove entries of deleted cameras
+            defined_cams = set(data.get("camera_names", {}).keys())
+            for cam_id in list(cfg.get("rois", {})):
+                if cam_id not in defined_cams:
+                    del cfg["rois"][cam_id]
+
+            with open("config.json", "w") as f:
+                json.dump(cfg, f, indent=4)
+
+            CONFIG.update(cfg)
+
+        Thread(target=restart_backend, daemon=True).start()
+        return jsonify({"message": "Config updated successfully, restarting backend..."}), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to update config: {str(e)}"}), 500
+
+def restart_backend():
+    """Restart the Flask backend safely"""
+    print("[INFO] Restarting backend after config update...")
+    time.sleep(1)
+    python = sys.executable
+    subprocess.Popen([python, "app.py"])
+    os._exit(0)
+    
+@api_bp.route("/camera_frame/<cam_id>", methods=["GET"])
+def get_camera_frame(cam_id):
+    """Return a single frame with ROI polygon overlay."""
+    try:
+        with open("config.json") as f:
+            cfg = json.load(f)
+
+        rtsp = cfg.get("rtsp_urls", {}).get(cam_id)
+        if not rtsp:
+            return jsonify({"error": f"No RTSP URL for {cam_id}"}), 404
+
+        cap = cv2.VideoCapture(rtsp)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            return jsonify({"error": "Failed to read frame"}), 500
+
+        cam_type = cfg.get("camera_types", {}).get(cam_id)
+        roi = cfg.get("rois", {}).get(cam_id, [])
+
+        # Color based on camera type
+        color = (0, 255, 255) if cam_type == "ppe" else (0, 165, 255)
+
+        # Draw polygon if exists
+        if len(roi) >= 3:
+            pts = np.array(roi, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(frame, [pts], True, color, 3)
+
+        _, buffer = cv2.imencode(".jpg", frame)
+        img_base64 = base64.b64encode(buffer).decode("utf-8")
+        return jsonify({"image": img_base64})
+
+    except Exception as e:
+        return jsonify({"error": f"Failed: {str(e)}"}), 500
