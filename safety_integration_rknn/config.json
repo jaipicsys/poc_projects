@@ -3,7 +3,10 @@
     "output_dir": "output",
     "fire_model_path": "fire.rknn",
     "violation_classes": [
- "hardhat", "no_hardhat", "vest", "no_vest"
+        "hardhat",
+        "no_hardhat",
+        "vest",
+        "no_vest"
     ],
     "draw_annotations_on_display": false,
     "ENABLE_TIMING_LOGS": false,
@@ -11,22 +14,50 @@
     "flask_port": 5002,
     "save_latest_frames": true,
     "camera_names": {
-        "cam1": "Warehouse",
-        "cam2": "Entrance",
-        "cam3": "Loading Dock",
-        "cam4": "Storage"
+        "cam1": "warehouse",
+        "cam2": "fire"
     },
     "rtsp_urls": {
         "cam1": "/home/cat/yas_work_rknn/safety_integration/5min.mp4",
-        "cam2": "/home/cat/yas_work_rknn/safety_integration/5min.mp4",
-        "cam3": "/home/cat/yas_work_rknn/safety_integration/fire_test.mp4",
-        "cam4": "/home/cat/yas_work_rknn/safety_integration/fire_test.mp4"
+        "cam2": "/home/cat/yas_work_rknn/safety_integration/5min.mp4"
     },
     "camera_types": {
         "cam1": "ppe",
-        "cam2": "ppe",
-        "cam3": "fire",
-        "cam4": "fire"
+        "cam2": "fire"
+    },
+    "rois": {
+        "cam1": [
+            [
+                1235,
+                703
+            ],
+            [
+                2307,
+                802
+            ],
+            [
+                2099,
+                1513
+            ],
+            [
+                675,
+                1302
+            ]
+        ],
+        "cam2": [
+            [
+                402,
+                635
+            ],
+            [
+                1020,
+                1460
+            ],
+            [
+                150,
+                1426
+            ]
+        ]
     },
     "email": {
         "smtp_lib": "SMTP",
