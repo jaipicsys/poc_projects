@@ -5,15 +5,17 @@ import time
 import json
 import numpy as np
 from datetime import datetime
+from typing import Optional
 from sort import Sort
 from rknnlite.api import RKNNLite
 from db import insert_perimeter_event_async, start_db_thread, update_camera_status
 
 # ---------------- Configurable constants ----------------
 INPUT_SIZE = 512
-CONF_THRESH = 0.5
-NMS_IOU_THRESH = 0.45
-TRACKER_PARAMS = dict(max_age=30, min_hits=3, iou_threshold=0.3)
+CONF_THRESH = 0.3
+NMS_IOU_THRESH = 0.4
+TRACKER_PARAMS = dict(max_age=90, min_hits=1, iou_threshold=0.2)
+OUTPUT_DIR_DEFAULT = "output"
 
 # ---------------- Utility: letterbox ----------------
 def letterbox_image(src, input_w, input_h, fill=(114, 114, 114)):
@@ -207,15 +209,18 @@ def convert_boxes_from_input_to_original(boxes, input_w, input_h, orig_w, orig_h
 
 # ---------------- Perimeter Processor ----------------
 class PerimeterProcessor:
-    def __init__(self, config, camera_id: str, rtsp_url: str, on_done_callback=None):
+    def __init__(self, config: Optional[dict], camera_id: str, rtsp_url: str, on_done_callback=None):
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
         self.on_done_callback = on_done_callback
         self.config = config or {}
-        output_dir = self.config.get("output_dir", "output")
+
+        # Directories
+        output_dir = self.config.get("output_dir", OUTPUT_DIR_DEFAULT)
         self.snapshot_dir = os.path.join(output_dir, camera_id, "snapshots")
         os.makedirs(self.snapshot_dir, exist_ok=True)
 
+        # RKNN
         model_path = self.config.get("perimeter_model_path", "model.rknn")
         self.rknn = RKNNLite()
         print(f"[INFO] Loading RKNN model: {model_path}")
@@ -224,17 +229,19 @@ class PerimeterProcessor:
             raise RuntimeError(f"Failed to load RKNN model: {model_path}")
         ret = self.rknn.init_runtime()
         if ret != 0:
-            raise RuntimeError("Failed to init RKNN runtime")
+            raise RuntimeError("Failed to initialize RKNN runtime")
 
+        # Tracker & state
         self.tracker = Sort(**TRACKER_PARAMS)
-        self.zones = self.config.get("perimeter_zones", {}).get(camera_id, [])
-        self.cooldown_seconds = float(self.config.get("perimeter_cooldown_sec", 30))
-        self.match_confidence = float(self.config.get("perimeter_conf", CONF_THRESH))
-        self.tracked_last_logged = {}
-        self.logged_breaches = set()
-        self.input_size = INPUT_SIZE
+        self.logged_track_ids = set()  # log each track once
 
-    # ---------- helpers ----------
+        # Zones & confidence
+        self.zones = self.config.get("perimeter_zones", {}).get(camera_id, [])
+        self.match_confidence = float(self.config.get("perimeter_conf", CONF_THRESH))
+        self.input_size = INPUT_SIZE
+        self.event_class = "perimeter_breach"
+
+    # ---------------- Helpers ----------------
     def _point_in_any_zone(self, point):
         px, py = point
         for zone in self.zones:
@@ -244,142 +251,115 @@ class PerimeterProcessor:
             if cv2.pointPolygonTest(pts, (int(px), int(py)), False) >= 0:
                 return True
         return False
-    
+
     def _save_snapshot(self, frame, frame_idx, track_id, bbox=None, conf=None):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"breach_{self.camera_id}_{track_id}_{frame_idx}_{ts}.jpg"
+        filename = f"perimeter_{self.camera_id}_{track_id}_{frame_idx}_{ts}.jpg"
         path = os.path.join(self.snapshot_dir, filename)
         snap = frame.copy()
         if bbox:
             try:
                 x1, y1, x2, y2 = map(int, bbox)
                 cv2.rectangle(snap, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            except Exception:
+            except:
                 pass
-        label = f"perimeter_breach"
+        label = self.event_class
         if conf is not None:
-            try:
-                label = f"{label} {conf:.2f}"
-            except Exception:
-                pass
-        try:
-            cv2.putText(snap, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-        except Exception:
-            pass
+            label += f" {conf:.2f}"
+        cv2.putText(snap, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
         cv2.imwrite(path, snap)
         return path
 
-    # ---------- main loop ----------
+    # ---------------- Main Loop ----------------
     def process_video(self):
-        print(f"\n[INFO] Starting PerimeterProcessor for camera {self.camera_id}...")
+        print(f"[INFO] Starting PerimeterProcessor for camera {self.camera_id}...")
         update_camera_status(self.camera_id, "starting")
         start_db_thread()
 
-        while True:
-            cap = cv2.VideoCapture(self.rtsp_url)
-            if not cap.isOpened():
-                print(f"[WARN] Perimeter camera {self.camera_id} unavailable. Retrying in 2 minutes...")
-                update_camera_status(self.camera_id, "unavailable")
-                time.sleep(120)
-                if self.on_done_callback:
-                    self.on_done_callback(self.camera_id)
+        cap = cv2.VideoCapture(self.rtsp_url)
+        if not cap.isOpened():
+            print(f"[ERROR] Camera {self.camera_id} cannot be opened")
+            update_camera_status(self.camera_id, "stopped")
+            return
+
+        print(f"[INFO] Perimeter camera {self.camera_id} connected successfully.")
+        update_camera_status(self.camera_id, "running")
+        frame_idx = 0
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                frame_idx += 1
                 continue
+            orig_h, orig_w = frame.shape[:2]
 
-            print(f"[INFO] Perimeter camera {self.camera_id} connected successfully.")
-            update_camera_status(self.camera_id, "running")
+            # Optional: draw zones
+            for zone in self.zones:
+                pts = np.array(zone.get("points", []), dtype=np.int32)
+                if pts.size:
+                    cv2.polylines(frame, [pts], True, (0, 255, 255), 2)
 
-            frame_idx = 0
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            # Prepare RKNN input
+            padded, scale, pad_x, pad_y = letterbox_image(frame, self.input_size, self.input_size)
+            img_input = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+            img_input = np.expand_dims(img_input, 0).astype(np.uint8)
 
-                orig_h, orig_w = frame.shape[:2]
-
-                for zone in self.zones:
-                    pts = np.array(zone.get("points", []), dtype=np.int32)
-                    if pts.size:
-                        try:
-                            cv2.polylines(frame, [pts], True, (255, 255, 0), 2)
-                        except Exception:
-                            pass
-                padded, scale, pad_x, pad_y = letterbox_image(frame, self.input_size, self.input_size)
-                img_input = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
-                img_input = np.expand_dims(img_input, 0).astype(np.uint8)
-
-                # RKNN inference
-                try:
-                    outputs = self.rknn.inference([img_input])
-                except Exception as e:
-                    print(f"[ERROR] RKNN inference failed: {e}")
-                    break
-
-                attrs = [get_attr_info(self.rknn, i) for i in range(len(outputs))]
-                raw_quant = any([o.dtype in (np.int8, np.uint8) for o in outputs])
-                quant_signed = True
-                if attrs and attrs[0]:
-                    quant_signed = bool(attrs[0].get('is_signed', True))
-
-                boxes_in_input = decode_dfl_heads_python(
+            # RKNN inference
+            try:
+                outputs = self.rknn.inference([img_input])
+                attrs = [None] * len(outputs)
+                boxes = decode_dfl_heads_python(
                     outputs, attrs,
-                    orig_w=orig_w, orig_h=orig_h,
-                    input_w=self.input_size, input_h=self.input_size,
-                    raw_quant=raw_quant, quant_signed=quant_signed,
+                    orig_w, orig_h,
+                    self.input_size, self.input_size,
+                    raw_quant=True,
+                    quant_signed=True,
                     conf_thres=self.match_confidence
                 )
-                boxes_in_input = [b for b in boxes_in_input if b['class_id'] == 0]  # only humans
-                convert_boxes_from_input_to_original(
-                    boxes_in_input, self.input_size, self.input_size, orig_w, orig_h, scale, pad_x, pad_y
-                )
-                final_boxes = NMS(boxes_in_input, iou_thresh=NMS_IOU_THRESH)
+                convert_boxes_from_input_to_original(boxes, self.input_size, self.input_size, orig_w, orig_h, scale, pad_x, pad_y)
+                boxes = NMS(boxes, NMS_IOU_THRESH)
+                boxes = [b for b in boxes if b['class_id'] == 0]
+            except Exception as e:
+                print(f"[ERROR] decode failed at frame {frame_idx}: {e}")
+                boxes = []
 
-                # prepare detections for SORT
-                if final_boxes:
-                    dets_np = np.array([[b['x1'], b['y1'], b['x2'], b['y2'], b['conf']] for b in final_boxes], dtype=float)
-                else:
-                    dets_np = np.empty((0, 5))
+            # SORT tracking
+            dets_np = np.array([[b['x1'], b['y1'], b['x2'], b['y2'], b['conf']] for b in boxes], dtype=float) if boxes else np.empty((0,5))
+            tracks = self.tracker.update(dets_np)
 
-                tracks = self.tracker.update(dets_np)
+            for t in tracks:
+                x1, y1, x2, y2, track_id = map(int, t)
 
-                now_ts = time.time()
-                for t in tracks:
-                    x1, y1, x2, y2, track_id = map(int, t)
-                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                    
-                    inside = self._point_in_any_zone((cx, cy))
-                    conf = None
-                    if inside:
-                        last_ts = self.tracked_last_logged.get(track_id, 0)
-                        if (track_id not in self.logged_breaches) or ((now_ts - last_ts) > self.cooldown_seconds):
-                            self.logged_breaches.add(track_id)
-                            self.tracked_last_logged[track_id] = now_ts
-                            timestamp_iso = datetime.now().isoformat()
-                            snapshot_path = self._save_snapshot(frame, frame_idx, track_id, bbox=[x1, y1, x2, y2], conf=conf)
-                            try:
-                                insert_perimeter_event_async(
-                                    self.camera_id,
-                                    frame_idx=frame_idx,
-                                    track_id=track_id,
-                                    event="perimeter_breach",
-                                    bbox=[x1, y1, x2, y2],
-                                    snapshot_path=snapshot_path,
-                                    timestamp=timestamp_iso,
-                                    confidence=conf
-                                )
-                                print(f"[PERIMETER] {self.camera_id} | obj:{track_id} | frame:{frame_idx} | INSIDE ROI")
-                            except Exception as e:
-                                print(f"[ERROR] insert_perimeter_event_async failed: {e}")
+                # Corner-based perimeter detection
+                corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
 
+                if any(self._point_in_any_zone(p) for p in corners):
+                    if track_id not in self.logged_track_ids:
+                        self.logged_track_ids.add(track_id)
 
-                frame_idx += 1
+                        snapshot_path = self._save_snapshot(frame, frame_idx, track_id, bbox=[x1, y1, x2, y2])
 
-            cap.release()
-            print(f"[INFO][{self.camera_id}] Process ended at frame {frame_idx}")
-            update_camera_status(self.camera_id, "stopped")
-            if self.on_done_callback:
-                self.on_done_callback(self.camera_id)
-            print(f"[INFO] Retrying Perimeter camera {self.camera_id} in 2 minutes...\n")
-            time.sleep(120)
+                        try:
+                            insert_perimeter_event_async(
+                                self.camera_id,
+                                frame_idx,
+                                track_id,
+                                self.event_class,
+                                bbox=[x1, y1, x2, y2],
+                                snapshot_path=snapshot_path,
+                                timestamp=datetime.now().isoformat(),
+                                confidence=float(np.max([b['conf'] for b in boxes])) if boxes else None
+                            )
+                            print(f"[PERIMETER] {self.camera_id} | track:{track_id} | frame:{frame_idx} | INSIDE ROI")
+                        except Exception as e:
+                            print(f"[ERROR] insert_perimeter_event_async failed: {e}")
+
+            frame_idx += 1
+
+        cap.release()
+        update_camera_status(self.camera_id, "stopped")
+        if self.on_done_callback:
+            self.on_done_callback(self.camera_id)
 
     def __del__(self):
         try:
