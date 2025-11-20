@@ -1,0 +1,33 @@
+{
+    "model_path": "yolov8n-pose.pt",
+
+    "flask_port": 5002,
+
+    "rtsp_urls": {
+        "cam1": "test_videos/fall_test7.mp4",
+        "cam2": "test_videos/fall_test6.mp4",
+        "cam3": "test_videos/fall_test5.mp4",
+        "cam4": "test_videos/fall_test4.mp4"
+    },
+
+    "retry_sleep_s": 120,
+    "alert_cooldown_ms": 60000,
+    "email": {
+        "smtp_lib": "SMTP",
+        "smtp_server": "smtp.gmail.com",
+        "smtp_port": 587,
+        "sender": "picsys.enterprise@gmail.com",
+        "password": "evmz lqqk oity rrvi",
+        "use_auth": true,
+        "recipients": [
+            "pranav.mishra@picsys.co.in",
+            "axr3125@gmail.com"
+        ],
+        "cc": [
+            "santosh.raj@picsys.co.in"
+        ],
+        "site_name": "RUAS Parking",
+        "company_name": "ABC Pvt Ltd",
+        "contact_info": "Phone: +91-1234567890"
+    }
+}
