@@ -164,12 +164,12 @@ def now_ms():
     return int(time.time() * 1000)
 
 class RoomStateManager:
-    def __init__(self, entry_delay_ms: int = 2000, critical_delay_ms: int = 5000):
+    def __init__(self, entry_delay_ms: int = 2000, emergency_delay_ms: int = 5000):
         self.state = "stable"
         self.pending_state: Optional[str] = None
         self.pending_since: Optional[int] = None
         self.entry_delay_ms = entry_delay_ms
-        self.critical_delay_ms = critical_delay_ms
+        self.emergency_delay_ms = emergency_delay_ms
 
     def update(self, persons: List[Dict], patient_posture: str, falling_detected: bool) -> str:
         """
@@ -178,7 +178,7 @@ class RoomStateManager:
         :param persons: list of dicts, each with a 'pid' key
         :param patient_posture: 'lying', 'sitting', 'standing', etc.
         :param falling_detected: True if a fall was detected
-        :return: current room state ('stable', 'caution', or 'critical')
+        :return: current room state ('stable', 'caution', or 'emergency')
         """
         now = now_ms()
         current = self.state
@@ -190,22 +190,22 @@ class RoomStateManager:
         num_unique_pids = len(unique_pids)
 
         # ---------------------------------------------------------
-        # RULE 0: CRITICAL LOCK
-        # If currently critical, remain critical until 2+ people present
+        # RULE 0: emergency LOCK
+        # If currently emergency, remain emergency until 2+ people present
         # ---------------------------------------------------------
-        if current == "critical" and num_unique_pids < 2:
-            return "critical"
+        if current == "emergency" and num_unique_pids < 2:
+            return "emergency"
 
         # ---------------------------------------------------------
-        # RULE 1: FALL → CRITICAL immediately
+        # RULE 1: FALL → emergency immediately
         # ---------------------------------------------------------
         if falling_detected:
-            if current != "critical":
-                print(f"[INFO] STATE CHANGED: {current} → critical (trigger=fall_detected)")
-            self.state = "critical"
+            if current != "emergency":
+                print(f"[INFO] STATE CHANGED: {current} → emergency (trigger=fall_detected)")
+            self.state = "emergency"
             self.pending_state = None
             self.pending_since = None
-            return "critical"
+            return "emergency"
 
         # ---------------------------------------------------------
         # RULE 2: Posture-based normal behavior (stable / caution)
@@ -227,7 +227,7 @@ class RoomStateManager:
         # ---------------------------------------------------------
         # Determine if a delay is required (debounce)
         # ---------------------------------------------------------
-        if current == "critical" and desired != "critical":
+        if current == "emergency" and desired != "emergency":
             needs_delay = True
         else:
             needs_delay = (
@@ -242,10 +242,10 @@ class RoomStateManager:
             return current
 
         # ---------------------------------------------------------
-        # Delayed transition (stable↔caution or critical exit)
+        # Delayed transition (stable↔caution or emergency exit)
         # ---------------------------------------------------------
         if needs_delay:
-            delay = self.critical_delay_ms if current == "critical" else self.entry_delay_ms
+            delay = self.emergency_delay_ms if current == "emergency" else self.entry_delay_ms
 
             if self.pending_state != desired:
                 self.pending_state = desired
@@ -531,7 +531,7 @@ class FallProcessor:
         )
         self.state_mgr = RoomStateManager(
             entry_delay_ms=config.get("entry_delay_ms", 3000),   # normal delay
-            critical_delay_ms=config.get("critical_delay_ms", 5000)  # 5-sec delay for critical exit
+            emergency_delay_ms=config.get("emergency_delay_ms", 5000)  # 5-sec delay for emergency exit
         )
 
         self.retry_sleep_s = int(config.get("retry_sleep_s", 120))
@@ -697,7 +697,7 @@ class FallProcessor:
                         # Insert into DB
                         try:
                             # adopt signature from your db helpers
-                            alert_type = new_state.lower()  # normal / low / critical
+                            alert_type = new_state.lower()  # normal / low / emergency
 
                             image_path = self._save_frame(frame, media_dir)
                             insert_patient_alert(pid, etype, alert_type, self.camera_id, image_path)
