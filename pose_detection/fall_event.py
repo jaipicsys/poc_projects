@@ -17,17 +17,9 @@ from test import (
     skeleton,
     limb_color
 )
-# Model import (RKNN)
 from rknn.api import RKNN
-
-# DB helpers
 from db import insert_patient_alert, update_camera_status, add_history
-
-# -----------------------
-# Configurable defaults
-# -----------------------
 MODEL_PATH_DEFAULT = "fall.rknn" 
-
 MATCH_THRESHOLD_PX = 80
 PERSON_QUEUE_MAXLEN = 300
 PERSON_STALE_MS = 5000
@@ -38,7 +30,6 @@ VEL_THRESH_DEFAULT = 100.0
 BBOX_CONF_THRESH_DEFAULT = 0.7
 KP_CONF_THRESH_DEFAULT = 0.7
 DEBUG_ANNOTATE = False
-
 def draw_room_state(frame, state):
     """
     Draws the current room state text on the video frame.
@@ -70,9 +61,6 @@ def draw_room_state(frame, state):
                 font, font_scale, color, thickness, cv2.LINE_AA)
     return frame
 
-# -----------------------
-# Utilities
-# -----------------------
 def now_ms() -> int:
     return int(pytime.time() * 1000)
 
@@ -171,72 +159,91 @@ def draw_velocity_bbox(frame, xyxy, velocity, thresh=300):
     except Exception:
         pass
 
-# -----------------------
-# RoomStateManager
-# -----------------------
+def now_ms():
+    import time
+    return int(time.time() * 1000)
+
 class RoomStateManager:
     def __init__(self, entry_delay_ms: int = 2000, critical_delay_ms: int = 5000):
         self.state = "stable"
         self.pending_state: Optional[str] = None
         self.pending_since: Optional[int] = None
         self.entry_delay_ms = entry_delay_ms
-        self.critical_delay_ms = critical_delay_ms   # for clearing critical
+        self.critical_delay_ms = critical_delay_ms
 
-    def update(self, num_people: int, patient_posture: str, falling_detected: bool) -> str:
+    def update(self, persons: List[Dict], patient_posture: str, falling_detected: bool) -> str:
+        """
+        Update the room state based on detected persons, posture, and fall events.
+        
+        :param persons: list of dicts, each with a 'pid' key
+        :param patient_posture: 'lying', 'sitting', 'standing', etc.
+        :param falling_detected: True if a fall was detected
+        :return: current room state ('stable', 'caution', or 'critical')
+        """
         now = now_ms()
-        desired = self.state
+        current = self.state
+        desired = current
         trigger = ""
 
-        # --------------------------
-        # RULE 1: FALL => CRITICAL instantly
-        # --------------------------
+        # Count unique PIDs in the current frame
+        unique_pids = set(p["pid"] for p in persons)
+        num_unique_pids = len(unique_pids)
+
+        # ---------------------------------------------------------
+        # RULE 0: CRITICAL LOCK
+        # If currently critical, remain critical until 2+ people present
+        # ---------------------------------------------------------
+        if current == "critical" and num_unique_pids < 2:
+            return "critical"
+
+        # ---------------------------------------------------------
+        # RULE 1: FALL → CRITICAL immediately
+        # ---------------------------------------------------------
         if falling_detected:
-            desired = "critical"
-            trigger = "fall_detected"
-        elif patient_posture == "lying":
+            if current != "critical":
+                print(f"[INFO] STATE CHANGED: {current} → critical (trigger=fall_detected)")
+            self.state = "critical"
+            self.pending_state = None
+            self.pending_since = None
+            return "critical"
+
+        # ---------------------------------------------------------
+        # RULE 2: Posture-based normal behavior (stable / caution)
+        # ---------------------------------------------------------
+        if patient_posture == "lying":
             desired = "stable"
             trigger = "lying"
         elif patient_posture in ("sitting", "standing"):
-            desired = "caution" if num_people == 1 else "stable"
-            trigger = "alone" if num_people == 1 else "not_alone"
+            if num_unique_pids >= 2:
+                desired = "stable"
+                trigger = "not_alone"
+            else:
+                desired = "caution"
+                trigger = "alone"
         else:
             desired = "stable"
             trigger = "unknown"
 
-        current = self.state
-
-        # --------------------------------------------------
-        # IMMEDIATE RULE: if desired == critical → switch NOW
-        # --------------------------------------------------
-        if desired == "critical" and current != "critical":
-            print(f"[INFO] STATE CHANGED: {current} → critical  (trigger={trigger})")
-            self.state = "critical"
-            self.pending_state = None
-            self.pending_since = None
-            return self.state
-
-        # --------------------------------------------------
-        # DEBOUNCE RULES (5 sec)
-        # Apply when:
-        #   stable <-> caution
-        #   critical -> anything
-        # --------------------------------------------------
-        needs_delay = False
-
-        if (current == "stable" and desired == "caution") or \
-           (current == "caution" and desired == "stable"):
-            needs_delay = True
-
+        # ---------------------------------------------------------
+        # Determine if a delay is required (debounce)
+        # ---------------------------------------------------------
         if current == "critical" and desired != "critical":
             needs_delay = True
+        else:
+            needs_delay = (
+                (current == "stable" and desired == "caution") or
+                (current == "caution" and desired == "stable")
+            )
 
-        # No change
+        # No state change needed
         if desired == current:
             self.pending_state = None
             self.pending_since = None
             return current
 
-        # Must delay transition
+        # ---------------------------------------------------------
+        # Delayed transition (stable↔caution or critical exit)
+        # ---------------------------------------------------------
         if needs_delay:
             delay = self.critical_delay_ms if current == "critical" else self.entry_delay_ms
 
@@ -245,16 +252,20 @@ class RoomStateManager:
                 self.pending_since = now
             else:
                 if now - self.pending_since >= delay:
-                    print(f"[INFO] STATE CHANGED: {current} → {desired}  (trigger={trigger})")
+                    print(f"[INFO] STATE CHANGED: {current} → {desired} (trigger={trigger})")
                     self.state = desired
                     self.pending_state = None
                     self.pending_since = None
 
             return self.state
 
-        # Otherwise — immediate switch
-        print(f"[INFO] STATE CHANGED: {current} → {desired}  (trigger={trigger})")
+        # ---------------------------------------------------------
+        # Immediate transition (everything else)
+        # ---------------------------------------------------------
+        print(f"[INFO] STATE CHANGED: {current} → {desired} (trigger={trigger})")
         self.state = desired
+        self.pending_state = None
+        self.pending_since = None
         return self.state
 
 class FallDetector:
@@ -450,14 +461,15 @@ class FallDetector:
                         x, y, conf = kp
                         if conf > 0.1:  # only draw confident keypoints
                             color = kpt_color[kp_idx % len(kpt_color)]
-                            cv2.circle(annotated, (int(x), int(y)), 3, color, -1)
+                            cv2.circle(annotated, (tuple(x), tuple(y)), 3, color, -1)
 
                     for j1, j2 in skeleton:
                         x1_s, y1_s, c1 = keypoints[j1]
                         x2_s, y2_s, c2 = keypoints[j2]
                         if c1 > 0.1 and c2 > 0.1:
                             color = limb_color.get((j1, j2), (0, 255, 255))
-                            cv2.line(annotated, (int(x1_s), int(y1_s)), (int(x2_s), int(y2_s)), color, 2)
+                            
+                            cv2.line(annotated, (tuple(x1_s), tuple(y1_s)), (tuple(x2_s), tuple(y2_s)), color, 2)
 
                 except Exception as e:
                     if self.debug:
@@ -612,11 +624,13 @@ class FallProcessor:
 
                     # get alerts and summary from detector
                     alerts, summary, annotated = self.detector.process_frame(frame)
+                    tracked_persons = [{"pid": pid} for pid in self.detector.person_states.keys()] if self.detector.person_states else []
 
-                    # update room state using summary
-                    current_state = self.state_mgr.update(summary.get("num_people", 0),
-                                                         summary.get("patient_posture", "unknown"),
-                                                         summary.get("falling_detected", False))
+                    current_state = self.state_mgr.update(
+                        persons=tracked_persons,
+                        patient_posture=summary.get("patient_posture", "unknown"),
+                        falling_detected=summary.get("falling_detected", False)
+                    )
 
                     # Count number of active tracked people
                     num_people = len(self.detector.person_states)
@@ -632,8 +646,14 @@ class FallProcessor:
                     else:
                         patient_posture = "unknown"
 
-                    # Update room state
-                    new_state = self.state_mgr.update(num_people, patient_posture, falling_detected)
+                    tracked_persons = [{"pid": pid} for pid in self.detector.person_states.keys()]
+
+                    new_state = self.state_mgr.update(
+                        persons=tracked_persons,
+                        patient_posture=summary.get("patient_posture", "unknown"),
+                        falling_detected=summary.get("falling_detected", False)
+                    )
+
                     # ----------------------------
                     # Log State Change
                     # ----------------------------
@@ -762,13 +782,3 @@ class FallProcessor:
                         cv2.destroyAllWindows()
                     except:
                         pass
-
-                # # optional callback
-                # if self.on_done_callback:
-                #     try:
-                #         self.on_done_callback(self.camera_id)
-                #     except Exception:
-                #         pass
-
-                # print(f"[INFO] Retrying camera {self.camera_id} in {self.retry_sleep_s}s...\n")
-                # pytime.sleep(self.retry_sleep_s)
