@@ -1,16 +1,13 @@
 {
-    "model_path": "yolov8n-pose.pt",
-
-    "flask_port": 5002,
+    "model_path": "fall.rknn",
+    "enable_display":"False",
+    "flask_port": 5005,
 
     "rtsp_urls": {
-        "cam1": "test_videos/fall_test7.mp4",
-        "cam2": "test_videos/fall_test6.mp4",
-        "cam3": "test_videos/fall_test5.mp4",
-        "cam4": "test_videos/fall_test4.mp4"
+        "cam2": "f2.mp4"
     },
 
-    "retry_sleep_s": 120,
+    "retry_sleep_s": 60,
     "alert_cooldown_ms": 60000,
     "email": {
         "smtp_lib": "SMTP",
