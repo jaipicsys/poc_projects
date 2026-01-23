@@ -2,3 +2,6 @@
 *.mp4
 *.db
 *.pt
+*/media
+*/test_videos
+*/config.json
