@@ -1,0 +1,47 @@
+{
+    "model_path": "hv2.pt",
+    "output_dir": "output",
+    "fire_model_path": "fire_model.pt",
+    "violation_classes": [
+ "no_hardhat", "no_vest"
+    ],
+    "draw_annotations_on_display": false,
+    "ENABLE_TIMING_LOGS": false,
+    "enable_display": true,
+    "flask_port": 5002,
+    "save_latest_frames": true,
+    "camera_names": {
+        "cam1": "Warehouse",
+        "cam2": "Entrance",
+        "cam3": "Loading Dock",
+        "cam4": "Storage"
+    },
+    "rtsp_urls": {
+        "cam1": "/home/picsys3/roll_crop.mp4"
+
+    },
+    "camera_types": {
+        "cam1": "fire",
+        "cam2": "ppe",
+        "cam3": "ppe",
+        "cam4": "fire"
+    },
+    "email": {
+        "smtp_lib": "SMTP",
+        "smtp_server": "smtp.gmail.com",
+        "smtp_port": 587,
+        "sender": "picsys.enterprise@gmail.com",
+        "password": "evmz lqqk oity rrvi",
+        "use_auth": true,
+        "recipients": [
+            "pranav.mishra@picsys.co.in",
+            "axr3125@gmail.com"
+        ],
+        "cc": [
+            "santosh.raj@picsys.co.in"
+        ],
+        "site_name": "RUAS Parking",
+        "company_name": "ABC Pvt Ltd",
+        "contact_info": "Phone: +91-1234567890"
+    }
+}
